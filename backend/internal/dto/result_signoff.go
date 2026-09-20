@@ -33,3 +33,16 @@ type UpdateResultSignoff struct {
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
 }
+
+// OpenCorrectionRequest starts a post-signing review against a signed result.
+type OpenCorrectionRequest struct {
+	Reason   string `json:"reason" binding:"required,min=3,max=500"`
+	Evidence string `json:"evidence" binding:"required,min=3,max=2000"`
+}
+
+// CorrectionDecisionRequest resolves an open review. Approve keeps the original signed
+// result and creates a linked draft; reject closes the review without changing the result.
+type CorrectionDecisionRequest struct {
+	Approve      bool   `json:"approve"`
+	DecisionNote string `json:"decisionNote" binding:"max=500"`
+}

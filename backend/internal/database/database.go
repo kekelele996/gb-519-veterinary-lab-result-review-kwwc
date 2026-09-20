@@ -82,6 +82,7 @@ func migrate(db *gorm.DB) error {
 		&model.AssayRun{},
 		&model.ResultSignoff{},
 		&model.ResultSignoffRevision{},
+		&model.SignoffCorrection{},
 	)
 }
 

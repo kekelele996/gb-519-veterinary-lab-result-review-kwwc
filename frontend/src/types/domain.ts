@@ -19,8 +19,30 @@ export interface DomainRecord {
   reviewedBy?: string;
   reviewReason?: string;
   revisions?: SignoffRevision[];
+  corrections?: SignoffCorrection[];
+  openCorrection?: SignoffCorrection | null;
+  latestCorrection?: SignoffCorrection | null;
+  correctionOfId?: number | null;
+  superseded?: boolean;
+  originalCode?: string;
+  correctionCode?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SignoffCorrection {
+  id: number;
+  resultSignoffId: number;
+  status: 'open' | 'approved' | 'rejected';
+  reason: string;
+  evidence: string;
+  requestedBy: string;
+  decidedBy?: string;
+  decisionNote?: string;
+  draftSignoffId?: number | null;
+  requestId: string;
+  createdAt: string;
+  decidedAt?: string;
 }
 
 export interface SignoffRevision {

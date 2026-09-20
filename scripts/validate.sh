@@ -109,6 +109,62 @@ same_actor_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.
   -d "{\"status\":\"signed\",\"expectedVersion\":$admin_review_version,\"reason\":\"same actor must be rejected\"}")
 [ "$same_actor_status" = "422" ]
 
+# --- Post-signing correction review (复核更正) on reviewer-signed record ---
+api="http://127.0.0.1:${BACKEND_PORT:-19519}/api"
+# only a reviewer/admin different from preparer (operator) and signer (reviewer) may open: admin
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections" -H "Authorization: Bearer $viewer_token" -H 'Content-Type: application/json' -d '{"reason":"viewer may not review","evidence":"evidence body here"}')" = "403" ]
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections" -H "Authorization: Bearer $operator_token" -H 'Content-Type: application/json' -d '{"reason":"operator may not review","evidence":"evidence body here"}')" = "403" ]
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d '{"reason":"original signer blocked","evidence":"evidence body here"}')" = "422" ]
+# reason and evidence are mandatory
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -d '{"reason":"x","evidence":""}')" = "400" ]
+
+correction=$(curl -fsS -X POST "$api/signoff/$signoff_id/corrections" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-open' \
+  -d '{"reason":"control value disputed after issue","evidence":"re-run QC chart and sample trace attached"}')
+correction_id=$(printf '%s' "$correction" | jq -er '.data.id')
+printf '%s' "$correction" | jq -e '.data.status == "open" and .data.requestedBy == "admin"' >/dev/null
+# duplicate / concurrent open keeps a single review
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -d '{"reason":"duplicate dispute","evidence":"duplicate evidence pack"}')" = "409" ]
+# the original signer cannot decide; admin approves and creates the linked correction draft
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections/$correction_id/decision" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -d '{"approve":true}')" = "422" ]
+approved=$(curl -fsS -X POST "$api/signoff/$signoff_id/corrections/$correction_id/decision" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-approve' \
+  -d '{"approve":true,"decisionNote":"evidence supports reissuing the result"}')
+draft_id=$(printf '%s' "$approved" | jq -er '.data.draftSignoffId')
+printf '%s' "$approved" | jq -e '.data.status == "approved" and .data.decidedBy == "admin" and (.data.draftSignoffId != null)' >/dev/null
+# a second decision on the closed review fails
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$signoff_id/corrections/$correction_id/decision" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -d '{"approve":false}')" = "409" ]
+# original signed result stays unchanged and links the new draft
+curl -fsS "$api/signoff/$signoff_id" -H "Authorization: Bearer $admin_token" \
+  | jq -e '.data.status == "signed" and .data.superseded == false and .data.latestCorrection.status == "approved" and .data.correctionCode != null' >/dev/null
+# correction draft copies the signed result, starts at v1 prepared by the approver and links back
+curl -fsS "$api/signoff/$draft_id" -H "Authorization: Bearer $admin_token" \
+  | jq --argjson original "$signoff_id" -e '.data.status == "draft" and .data.version == 1 and .data.preparedBy == "admin" and .data.correctionOfId == $original and .data.originalCode != null and .data.relatedCode != null' >/dev/null
+# resubmit and sign by a different user (admin self-sign blocked, reviewer signs)
+draft_v=$(curl -fsS "$api/signoff/$draft_id" -H "Authorization: Bearer $admin_token" | jq -er '.data.version')
+draft_pr=$(curl -fsS -X POST "$api/signoff/$draft_id/transition" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-submit' -d "{\"status\":\"peer_review\",\"expectedVersion\":$draft_v,\"reason\":\"resubmit corrected result\"}")
+draft_prv=$(printf '%s' "$draft_pr" | jq -er '.data.version')
+[ "$(curl -sS -o /dev/null -w '%{http_code}' -X POST "$api/signoff/$draft_id/transition" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -d "{\"status\":\"signed\",\"expectedVersion\":$draft_prv,\"reason\":\"self sign blocked\"}")" = "422" ]
+curl -fsS -X POST "$api/signoff/$draft_id/transition" -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-resign' -d "{\"status\":\"signed\",\"expectedVersion\":$draft_prv,\"reason\":\"independent review of corrected result\"}" \
+  | jq -e '.data.status == "signed" and .data.preparedBy == "admin" and .data.reviewedBy == "reviewer"' >/dev/null
+# old version remains signed but is superseded and still queryable
+curl -fsS "$api/signoff/$signoff_id" -H "Authorization: Bearer $admin_token" \
+  | jq -e '.data.status == "signed" and .data.superseded == true and .data.correctionCode != null' >/dev/null
+# correction review audit trail
+curl -fsS "$api/audits/SignoffCorrection/$correction_id?limit=10" -H "Authorization: Bearer $admin_token" \
+  | jq -e '[.data[].requestId] | index("gb519-correction-open") != null and index("gb519-correction-approve") != null' >/dev/null
+
+# --- Reject path leaves the seeded RS-003 result untouched and allows reopening ---
+rs3_id=$(curl -fsS "$api/signoff?search=RS-003" -H "Authorization: Bearer $admin_token" | jq -er '.data[0].id')
+rs3_correction=$(curl -fsS -X POST "$api/signoff/$rs3_id/corrections" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-rs3-open' -d '{"reason":"dispute seeded signed result","evidence":"repeat assay panel evidence"}')
+rs3_cid=$(printf '%s' "$rs3_correction" | jq -er '.data.id')
+curl -fsS -X POST "$api/signoff/$rs3_id/corrections/$rs3_cid/decision" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-rs3-reject' -d '{"approve":false,"decisionNote":"evidence insufficient"}' \
+  | jq -e '.data.status == "rejected" and .data.draftSignoffId == null' >/dev/null
+curl -fsS "$api/signoff/$rs3_id" -H "Authorization: Bearer $admin_token" \
+  | jq -e '.data.status == "signed" and .data.superseded == false and .data.latestCorrection.status == "rejected"' >/dev/null
+curl -fsS -X POST "$api/signoff/$rs3_id/corrections" -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-rs3-reopen' -d '{"reason":"new evidence after rejection","evidence":"second repeat panel attached"}' \
+  | jq -e '.data.status == "open"' >/dev/null
+
 curl -fsS "http://127.0.0.1:${BACKEND_PORT:-19519}/api/audits/ResultSignoff/$signoff_id?limit=10" \
   -H "Authorization: Bearer $reviewer_token" \
   | jq -e '[.data[].requestId] | index("gb519-signoff-create") != null and index("gb519-signoff-update") != null and index("gb519-signoff-submit") != null and index("gb519-signoff-signed") != null' >/dev/null

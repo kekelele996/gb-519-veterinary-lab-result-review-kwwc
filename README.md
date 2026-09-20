@@ -34,6 +34,7 @@ docker compose down -v --remove-orphans
 
 - 独立登录页和 viewer/operator/reviewer/admin 四级 RBAC；写操作至少需要 operator，审计接口至少需要 reviewer。
 - 结果签发只能按 `draft -> peer_review -> signed/rejected` 推进；签发与驳回必须由不同于制单人的 reviewer/admin 完成。
+- 已签发结果支持「复核更正」：异于签发人的 reviewer/admin 可发起带原因证据的复核，重复或并发只保留一条；同意保留原 signed 版本并建关联 draft，驳回仅关复核，新稿重提并经异人签发后生效、旧版标记为已替代但仍可查。
 - 每次签发创建、草稿编辑和状态决策都会追加不可覆盖的版本，保留证据、操作者、原因和 request ID。
 - 所有状态变化使用乐观锁并写入不可覆盖的审计日志；已进入复核的签发业务字段不可再编辑。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
@@ -119,6 +120,7 @@ KEEP_RUNNING=1 ./scripts/validate.sh
 |---|---|---|
 | `SpecimenState` | `received, testing, hold, released, disposed` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 | `SignoffState` | `draft, peer_review, signed, rejected` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
+| `SignoffCorrectionStatus` | `open, approved, rejected` | `backend/internal/model/result_signoff.go`、`frontend/src/types/status.ts` |
 
 每个实体自己的完整迁移图同样位于 `backend/internal/constants/status.go`；页面使用的状态列表位于 `frontend/src/types/status.ts`。修改状态时必须同步两处并更新对应服务测试。
 
@@ -128,6 +130,24 @@ KEEP_RUNNING=1 ./scripts/validate.sh
 2. 只有原制单人可以编辑或提交草稿；每次编辑和提交均追加版本。
 3. operator 不能作出最终签发决定；reviewer/admin 可以签发或驳回，但操作者必须不同于 `preparedBy`。
 4. `signed` 和 `rejected` 为终态，全部修订可从签发查询接口读取，审计历史可由 reviewer/admin 查询。
+
+## 签发后复核更正
+
+1. 仅 `signed` 记录可发起复核；发起人必须是 reviewer/admin，且异于该记录的 `preparedBy` 与 `reviewedBy`。
+2. 发起须填非空「复核原因」和「原因证据」；同一记录已有在办复核（或已同意但更正草稿尚未终态）时，重复或并发请求只保留一条，其余返回 `409 correction_conflict`。
+3. 复核决定同样要求异人。**同意**保留原 `signed` 结果不变，关闭复核并创建关联更正草稿（v1，`correctionOfId` 指回原记录，`preparedBy` 为同意人）；**驳回**只关闭复核，原结果完全不变。
+4. 更正草稿重新提交 `draft -> peer_review`，并由不同于其 `preparedBy` 的 reviewer/admin 签发后生效；生效时原记录置 `superseded=true` 但保留 `signed` 状态与全部历史版本，仍可查询，不可再被复核。
+5. 若更正草稿被驳回，原结果继续有效，可重新发起复核。
+6. 发起、同意/驳回、建草稿、替代均在同一数据库事务内完成，任一步失败整体回滚，并各自写入不可覆盖的审计日志（实体类型 `SignoffCorrection` 与 `ResultSignoff`）。
+
+接口（均需 reviewer 及以上角色）：
+
+```text
+POST /api/signoff/:id/corrections                            # 发起复核 {reason, evidence}
+POST /api/signoff/:id/corrections/:correctionId/decision      # 决定 {approve, decisionNote?}
+```
+
+列表/详情接口在签发记录上附带只读字段：`openCorrection`（在办复核）、`latestCorrection`（最近一次复核）、`correctionOfId`/`originalCode`（更正稿指向原结果）、`correctionCode`（原结果指向关联新草稿）、`superseded`（已被更正替代）。
 
 ## 环境变量
 
