@@ -112,6 +112,79 @@ same_actor_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.
 curl -fsS "http://127.0.0.1:${BACKEND_PORT:-19519}/api/audits/ResultSignoff/$signoff_id?limit=10" \
   -H "Authorization: Bearer $reviewer_token" \
   | jq -e '[.data[].requestId] | index("gb519-signoff-create") != null and index("gb519-signoff-update") != null and index("gb519-signoff-submit") != null and index("gb519-signoff-signed") != null' >/dev/null
+
+# 复核更正：异人 reviewer/admin 才能对 signed 记录发起复核，须填原因与证据。
+review_open_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id/reviews" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"reason":"missing evidence body"}')
+[ "$review_open_status" = "400" ]
+review_self_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:19519/api/signoff/$signoff_id/reviews" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d '{"reason":"original signer must not review own signoff","evidence":"self review forbidden by separation of duty"}')
+[ "$review_self_status" = "422" ]
+
+review=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id/reviews" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-review-open' \
+  -d '{"reason":"post-release metric discrepancy found","evidence":"re-run QC sheet contradicts signed value"}')
+review_id=$(printf '%s' "$review" | jq -er '.data.reviews[0].id')
+printf '%s' "$review" | jq -e '.data.status == "signed" and .data.reviews[0].status == "open" and .data.reviews[0].openedBy == "admin"' >/dev/null
+
+# 重复/并发发起只允许一条在办复核。
+review_dup_status=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id/reviews" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  -d '{"reason":"duplicate correction request","evidence":"duplicate evidence body attached"}')
+[ "$review_dup_status" = "409" ]
+
+# 原签发人不能裁决自己签发的结果。
+review_self_decide=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id/reviews/decision" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' \
+  -d "{\"reviewId\":$review_id,\"decision\":\"upheld\",\"reason\":\"original signer decision must be rejected\",\"expectedVersion\":$review_id}")
+[ "$review_self_decide" = "422" ]
+
+# 同意保留原 signed 版本并创建关联 draft，随后重提并经异人签发生效。
+upheld=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id/reviews/decision" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-review-uphold' \
+  -d "{\"reviewId\":$review_id,\"decision\":\"upheld\",\"reason\":\"deviation confirmed, create correction draft\",\"expectedVersion\":$review_id}")
+correction_id=$(printf '%s' "$upheld" | jq -er '.data.reviews[0].draftId')
+printf '%s' "$upheld" | jq -e --argjson cid "$correction_id" '
+  .data.status == "signed" and .data.version == 4
+  and .data.reviews[0].status == "upheld" and .data.reviews[0].draftId == $cid
+  and (.data.correctionDrafts | length) == 1
+  and .data.correctionDrafts[0].id == $cid and .data.correctionDrafts[0].status == "draft"
+  and .data.correctionDrafts[0].preparedBy == "admin"
+  and .data.correctionDrafts[0].correctionOfId == (.data.id)' >/dev/null
+
+correction_submit=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$correction_id/transition" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-submit' \
+  -d '{"status":"peer_review","expectedVersion":1,"reason":"corrected evidence ready for review"}')
+correction_submit_version=$(printf '%s' "$correction_submit" | jq -er '.data.version')
+correction_signed=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$correction_id/transition" \
+  -H "Authorization: Bearer $reviewer_token" -H 'Content-Type: application/json' -H 'X-Request-ID: gb519-correction-signed' \
+  -d "{\"status\":\"signed\",\"expectedVersion\":$correction_submit_version,\"reason\":\"corrected result independently verified\"}")
+printf '%s' "$correction_signed" | jq -e --argjson oid "$signoff_id" '
+  .data.status == "signed" and .data.preparedBy == "admin" and .data.reviewedBy == "reviewer"
+  and .data.correctionOfId == $oid and .data.correctionSource.status == "signed"' >/dev/null
+# 旧 signed 版本原样保留、仍可查询，复核已关闭且只生成一份更正草稿。
+curl -fsS "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$signoff_id" -H "Authorization: Bearer $admin_token" \
+  | jq -e '.data.status == "signed" and .data.version == 4 and (.data.revisions | length) == 4
+      and (.data.reviews | map(select(.status == "open")) | length) == 0
+      and (.data.correctionDrafts | length) == 1' >/dev/null
+
+# 驳回只关复核、原结果不变；关闭后可发起新一轮复核。
+seed_review=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff?page=1&pageSize=20&search=RS-003" \
+  -H "Authorization: Bearer $admin_token")
+seed_id=$(printf '%s' "$seed_review" | jq -er '.data[0].id')
+seed_version=$(printf '%s' "$seed_review" | jq -er '.data[0].version')
+seed_open=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$seed_id/reviews" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  -d '{"reason":"seed result complaint under verification","evidence":"external complaint document attached"}')
+seed_review_id=$(printf '%s' "$seed_open" | jq -er '.data.reviews[0].id')
+seed_rejected=$(curl -fsS -X POST "http://127.0.0.1:${BACKEND_PORT:-19519}/api/signoff/$seed_id/reviews/decision" \
+  -H "Authorization: Bearer $admin_token" -H 'Content-Type: application/json' \
+  -d "{\"reviewId\":$seed_review_id,\"decision\":\"rejected\",\"reason\":\"re-check confirms the signed value is correct\",\"expectedVersion\":$seed_review_id}")
+printf '%s' "$seed_rejected" | jq -e --argjson v "$seed_version" '.data.status == "signed" and .data.version == $v
+  and .data.reviews[0].status == "rejected" and (.data.correctionDrafts | length) == 0' >/dev/null
+
 curl -fsS "http://127.0.0.1:${BACKEND_PORT:-19519}/api/audit-summary?windowHours=24" -H "Authorization: Bearer $admin_token" \
   | jq -e '.data.total >= 6 and .data.transitions >= 3 and .data.uniqueActors >= 2' >/dev/null
 

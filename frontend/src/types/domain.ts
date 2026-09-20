@@ -18,9 +18,27 @@ export interface DomainRecord {
   preparedBy?: string;
   reviewedBy?: string;
   reviewReason?: string;
+  correctionOfId?: number;
   revisions?: SignoffRevision[];
+  reviews?: SignoffReview[];
+  correctionDrafts?: DomainRecord[];
+  correctionSource?: DomainRecord;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SignoffReview {
+  id: number;
+  resultSignoffId: number;
+  status: 'open' | 'upheld' | 'rejected';
+  reason: string;
+  evidence: string;
+  openedBy: string;
+  decidedBy?: string;
+  decisionReason?: string;
+  draftId?: number;
+  createdAt: string;
+  decidedAt?: string;
 }
 
 export interface SignoffRevision {

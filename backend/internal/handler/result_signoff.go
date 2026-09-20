@@ -23,6 +23,8 @@ func (h *ResultSignoffHandler) Register(group *gin.RouterGroup) {
 	resource.POST("", middleware.RequireMinimumRole("operator"), h.create)
 	resource.PUT("/:id", middleware.RequireMinimumRole("operator"), h.update)
 	resource.POST("/:id/transition", middleware.RequireMinimumRole("operator"), h.transition)
+	resource.POST("/:id/reviews", middleware.RequireMinimumRole("reviewer"), h.openReview)
+	resource.POST("/:id/reviews/decision", middleware.RequireMinimumRole("reviewer"), h.decideReview)
 	resource.DELETE("/:id", middleware.RequireRoles("admin"), h.remove)
 }
 
@@ -92,6 +94,42 @@ func (h *ResultSignoffHandler) transition(c *gin.Context) {
 		return
 	}
 	item, err := h.service.Transition(c.Request.Context(), id, input, actorFromContext(c), roleFromContext(c), requestIDFromContext(c))
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.OK(c, item)
+}
+
+func (h *ResultSignoffHandler) openReview(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input dto.OpenSignoffReview
+	if err := c.ShouldBindJSON(&input); err != nil {
+		util.Fail(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	item, err := h.service.OpenReview(c.Request.Context(), id, input, actorFromContext(c), roleFromContext(c), requestIDFromContext(c))
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	util.Created(c, item)
+}
+
+func (h *ResultSignoffHandler) decideReview(c *gin.Context) {
+	id, ok := parseID(c)
+	if !ok {
+		return
+	}
+	var input dto.DecideSignoffReview
+	if err := c.ShouldBindJSON(&input); err != nil {
+		util.Fail(c, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	item, err := h.service.ResolveReview(c.Request.Context(), id, input, actorFromContext(c), roleFromContext(c), requestIDFromContext(c))
 	if err != nil {
 		handleError(c, err)
 		return

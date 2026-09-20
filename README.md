@@ -30,12 +30,16 @@ docker compose down -v --remove-orphans
 | 动物样本来源 | `AnimalCase` | `/api/cases` | registered, sampling, testing, closed |
 | 检验样本 | `Specimen` | `/api/specimens` | received, testing, hold, released, disposed |
 | 检测运行 | `AssayRun` | `/api/assays` | planned, running, validated, invalid |
-| 结果签发 | `ResultSignoff` | `/api/signoff` | draft, peer_review, signed, rejected |
+| 结果签发 | `ResultSignoff` / `SignoffReview` | `/api/signoff` | draft, peer_review, signed, rejected |
 
 - 独立登录页和 viewer/operator/reviewer/admin 四级 RBAC；写操作至少需要 operator，审计接口至少需要 reviewer。
 - 结果签发只能按 `draft -> peer_review -> signed/rejected` 推进；签发与驳回必须由不同于制单人的 reviewer/admin 完成。
 - 每次签发创建、草稿编辑和状态决策都会追加不可覆盖的版本，保留证据、操作者、原因和 request ID。
 - 所有状态变化使用乐观锁并写入不可覆盖的审计日志；已进入复核的签发业务字段不可再编辑。
+- **签发结果复核更正**：reviewer/admin 可对 `signed` 记录发起复核（必须填写原因与证据）；同一 signed 记录同时只允许一条在办复核，重复或并发请求由唯一索引合并为一条。复核人必须异于原签发人。
+  - 同意（upheld）：原 `signed` 版本原样保留可查，系统在同一事务内复制结果创建关联更正草稿（`correctionOfId` 指向旧版，独立 v1 版本证据），并关闭复核。
+  - 驳回（rejected）：只关闭复核工单，原签发结果不变。
+  - 更正草稿由裁决人作为制单人，重新提交并经**另一名** reviewer/admin 异人签发后生效；任一步失败整体回滚。
 - 请求 ID、结构化日志、全局错误映射和 Redis 分布式限流。
 - 提供脱敏运行配置、当前会话、审计汇总和单实体审计历史接口。
 - 业务工作台支持查询、新建、状态推进、风险标识及操作审计查看。
@@ -119,6 +123,7 @@ KEEP_RUNNING=1 ./scripts/validate.sh
 |---|---|---|
 | `SpecimenState` | `received, testing, hold, released, disposed` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 | `SignoffState` | `draft, peer_review, signed, rejected` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
+| `SignoffReviewState` | `open, upheld, rejected` | `backend/internal/constants/status.go`、`frontend/src/types/status.ts` |
 
 每个实体自己的完整迁移图同样位于 `backend/internal/constants/status.go`；页面使用的状态列表位于 `frontend/src/types/status.ts`。修改状态时必须同步两处并更新对应服务测试。
 
@@ -128,6 +133,12 @@ KEEP_RUNNING=1 ./scripts/validate.sh
 2. 只有原制单人可以编辑或提交草稿；每次编辑和提交均追加版本。
 3. operator 不能作出最终签发决定；reviewer/admin 可以签发或驳回，但操作者必须不同于 `preparedBy`。
 4. `signed` 和 `rejected` 为终态，全部修订可从签发查询接口读取，审计历史可由 reviewer/admin 查询。
+5. 签发结果的复核更正：
+   - reviewer/admin 对 `signed` 记录 `POST /api/signoff/:id/reviews` 发起复核，须提供 `reason` 与 `evidence`；复核人必须不同于 `reviewedBy`。
+   - `signoff_reviews` 上 `(result_signoff_id, open_slot)` 复合唯一索引保证每条 signed 记录最多一条 `open` 复核（关闭后 `open_slot` 置 NULL，历史可累积）；重复发起返回 409。
+   - `POST /api/signoff/:id/reviews/decision` 裁决：`upheld` 在同一数据库事务内保留原 signed、创建关联 draft（`correctionOfId`、v1 `correction` 修订、审计），关复核并回写 `draftId`；`rejected` 仅关复核，原结果不变。草稿/修订/审计任一写入失败整体回滚。
+   - 更正草稿经原制单人之外的 reviewer/admin 重新 `peer_review -> signed` 后生效；旧 signed 记录及其全部修订始终可查，新草稿通过 `correctionSource` 指回旧版。
+   - 关闭一轮复核后可再次发起新一轮；并发裁决仅一条成功，其余按乐观冲突返回 409。
 
 ## 环境变量
 

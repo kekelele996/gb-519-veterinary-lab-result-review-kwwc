@@ -61,3 +61,18 @@ docker compose down -v --remove-orphans
 ```
 
 并确认没有名称包含 `veterinary-lab-result-review` 的容器、网络或数据卷。
+
+## 签发结果复核更正（2026-09-20 追加）
+
+新增 `SignoffReview`（`open/upheld/rejected`）与 `result_signoffs.correction_of_id` 关联，复核人必须异于原签发人。以下均实际执行通过：
+
+- `cd backend && go test ./... && go test -race ./... && go vet ./... && go build ./...`；
+  新增 `internal/service/result_signoff_review_test.go` 覆盖：发起复核须原因+证据、operator/原签发人被拒、非 signed 被拒、重复发起冲突；同意建关联 v1 草稿（字段复制、`correctionOfId`、`correction` 修订与 request ID）、异人重签后旧版 4 修订原样保留；驳回只关复核不建草稿；关闭后可发起新一轮；同一 signed 两轮同意生成两个编码唯一（含 signoff/review 序号）的草稿。
+- `cd frontend && npm run typecheck && npm run build` 通过。
+- SQLite 本地服务实际 HTTP 验证（admin/reviewer/operator/viewer 真实 JWT）：
+  - viewer 发起复核 403；原签发人 reviewer 发起/裁决均 422；缺证据 400；非异人裁决 422。
+  - 10 个并发发起：恰好 1×201、9×409，库里仅 1 条 open；6 个并发裁决：恰好 1×200，其余 409/422，仅 1 份更正草稿（事务回滚）。
+  - 同意后原记录仍 `signed` v3 不变，草稿 v1 `preparedBy=admin`；草稿经 admin 提交、reviewer 异人签发生效；`correctionSource` 指回旧版，旧版及其全部修订仍可查询。
+  - 驳回只把复核置 `rejected`、不产生草稿、原结果不变；驳回后可再次发起（历史为 `["rejected","open"]`）。
+  - `/api/signoff` 列表与详情均水合 `reviews`、`correctionDrafts`、`correctionSource`；审计新增 `review_open/review_uphold/review_reject/correction_create`，均带 request ID。
+- `scripts/validate.sh` 已扩展上述复核更正 API 断言（异人限制、409 重复、同意/驳回两条分支、异人重签、旧版可查）。

@@ -13,3 +13,15 @@ export async function transitionResultSignoff(id: number, status: string, expect
     method: 'POST', body: JSON.stringify({ status, expectedVersion, reason }),
   });
 }
+export async function openSignoffReview(id: number, reason: string, evidence: string) {
+  return request<DomainRecord>(`/signoff/${id}/reviews`, {
+    method: 'POST', body: JSON.stringify({ reason, evidence }),
+  });
+}
+export async function decideSignoffReview(
+  signoffId: number, reviewId: number, decision: 'upheld' | 'rejected', expectedVersion: number, reason: string,
+) {
+  return request<DomainRecord>(`/signoff/${signoffId}/reviews/decision`, {
+    method: 'POST', body: JSON.stringify({ reviewId, decision, reason, expectedVersion }),
+  });
+}

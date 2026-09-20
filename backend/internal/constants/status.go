@@ -26,6 +26,19 @@ const (
 
 var AllSignoffState = []string{"draft", "peer_review", "signed", "rejected"}
 
+// SignoffReviewState tracks the correction-review work order attached to a
+// signed result. It is intentionally separate from SignoffState because the
+// signed result itself never changes state while a review is in progress.
+type SignoffReviewState string
+
+const (
+	SignoffReviewOpen     SignoffReviewState = "open"
+	SignoffReviewUpheld   SignoffReviewState = "upheld"
+	SignoffReviewRejected SignoffReviewState = "rejected"
+)
+
+var AllSignoffReviewState = []string{"open", "upheld", "rejected"}
+
 var AnimalCaseTransitions = map[string]map[string]bool{
 	"registered": {"sampling": true, "testing": true},
 	"sampling":   {"testing": true, "closed": true, "registered": true},

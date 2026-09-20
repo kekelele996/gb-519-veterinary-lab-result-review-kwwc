@@ -7,8 +7,9 @@ export function ResultPanel({ records }: { records: DomainRecord[] }) {
   if (!records.length) return <EmptyState message="暂无可展示的结果证据" />;
   return <div className="evidence-strip">{records.slice(0, 4).map((item) => {
     const latest = item.revisions?.at(-1);
+    const openReview = item.reviews?.find((review) => review.status === 'open');
     return <article key={item.id}>
-      <div className="result-title"><strong>{item.code}</strong><StatusBadge status={item.status} /></div>
+      <div className="result-title"><strong>{item.code}</strong><span><StatusBadge status={item.status} />{openReview && <span className="status status--warning review-flag">复核中</span>}</span></div>
       <span>{item.name}</span>
       <small title={item.evidence}>{item.evidence || '尚未附加证据'}</small>
       <small>v{item.version} · {latest?.actor || item.reviewedBy || item.preparedBy || item.owner}</small>

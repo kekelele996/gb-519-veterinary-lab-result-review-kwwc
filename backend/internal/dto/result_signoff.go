@@ -33,3 +33,19 @@ type UpdateResultSignoff struct {
 	Evidence        string    `json:"evidence" binding:"max=2000"`
 	RelatedCode     string    `json:"relatedCode" binding:"max=64"`
 }
+
+// OpenSignoffReview starts a correction review for a signed result. Both the
+// reason and supporting evidence are mandatory.
+type OpenSignoffReview struct {
+	Reason   string `json:"reason" binding:"required,min=3,max=500"`
+	Evidence string `json:"evidence" binding:"required,min=3,max=2000"`
+}
+
+// DecideSignoffReview resolves a correction review. Decision "upheld" copies
+// the signed result into a linked draft; "rejected" only closes the review.
+type DecideSignoffReview struct {
+	ReviewID        uint   `json:"reviewId" binding:"required"`
+	Decision        string `json:"decision" binding:"required,oneof=upheld rejected"`
+	Reason          string `json:"reason" binding:"required,min=3,max=500"`
+	ExpectedVersion uint   `json:"expectedVersion" binding:"required"`
+}

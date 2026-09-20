@@ -92,7 +92,7 @@ func newSignoffTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	if err := db.AutoMigrate(&model.AuditLog{}, &model.ResultSignoff{}, &model.ResultSignoffRevision{}); err != nil {
+	if err := db.AutoMigrate(&model.AuditLog{}, &model.ResultSignoff{}, &model.ResultSignoffRevision{}, &model.SignoffReview{}); err != nil {
 		t.Fatalf("migrate sqlite: %v", err)
 	}
 	return db

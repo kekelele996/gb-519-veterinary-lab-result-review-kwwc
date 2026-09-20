@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,8 @@ type ResultSignoffService interface {
 	Create(context.Context, dto.CreateResultSignoff, string, string) (model.ResultSignoff, error)
 	Update(context.Context, uint, dto.UpdateResultSignoff, string, string) (model.ResultSignoff, error)
 	Transition(context.Context, uint, dto.TransitionRequest, string, string, string) (model.ResultSignoff, error)
+	OpenReview(context.Context, uint, dto.OpenSignoffReview, string, string, string) (model.ResultSignoff, error)
+	ResolveReview(context.Context, uint, dto.DecideSignoffReview, string, string, string) (model.ResultSignoff, error)
 	Delete(context.Context, uint, string, string) error
 	StatusCounts(context.Context) (map[string]int64, error)
 }
@@ -132,6 +135,77 @@ func (s *resultSignoffService) Transition(ctx context.Context, id uint, input dt
 	return s.repository.Get(ctx, id)
 }
 
+// OpenReview starts a correction review for a signed result. Only
+// reviewer/admin may open one, the reviewer must differ from the user who
+// signed the result, reason and evidence are mandatory, and duplicate or
+// concurrent requests collapse onto the single open work order.
+func (s *resultSignoffService) OpenReview(ctx context.Context, id uint, input dto.OpenSignoffReview, actor, role, requestID string) (model.ResultSignoff, error) {
+	if !isSignoffReviewerRole(role) {
+		return model.ResultSignoff{}, ErrReviewRequired
+	}
+	if err := validateReviewInput(input.Reason, input.Evidence); err != nil {
+		return model.ResultSignoff{}, err
+	}
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.ResultSignoff{}, err
+	}
+	if current.Status != string(constants.SignoffStateSigned) {
+		return model.ResultSignoff{}, fmt.Errorf("%w: %s has no signed result to review", ErrInvalidTransition, current.Status)
+	}
+	if openReview := findOpenReview(current.Reviews); openReview != nil {
+		return model.ResultSignoff{}, ErrReviewOpen
+	}
+	if current.ReviewedBy == "" || actor == current.ReviewedBy {
+		return model.ResultSignoff{}, ErrReviewerSeparation
+	}
+	now := time.Now().UTC()
+	open := true
+	review := &model.SignoffReview{
+		ResultSignoffID: id, OpenSlot: &open, Status: string(constants.SignoffReviewOpen),
+		Reason: strings.TrimSpace(input.Reason), Evidence: strings.TrimSpace(input.Evidence),
+		OpenedBy: actor, CreatedAt: now,
+	}
+	if err := s.repository.OpenReview(ctx, review, actor, requestID); err != nil {
+		return model.ResultSignoff{}, mapReviewError(err)
+	}
+	return s.repository.Get(ctx, id)
+}
+
+// ResolveReview concludes an open correction review. "upheld" creates a linked
+// v1 correction draft owned by the decider and closes the review; "rejected"
+// only closes the review. The original signed result is never mutated, so the
+// old version stays fully queryable.
+func (s *resultSignoffService) ResolveReview(ctx context.Context, id uint, input dto.DecideSignoffReview, actor, role, requestID string) (model.ResultSignoff, error) {
+	if !isSignoffReviewerRole(role) {
+		return model.ResultSignoff{}, ErrReviewRequired
+	}
+	if strings.TrimSpace(input.Reason) == "" {
+		return model.ResultSignoff{}, ErrInvalidInput
+	}
+	current, err := s.repository.Get(ctx, id)
+	if err != nil {
+		return model.ResultSignoff{}, err
+	}
+	if current.Status != string(constants.SignoffStateSigned) {
+		return model.ResultSignoff{}, fmt.Errorf("%w: %s has no signed result to review", ErrInvalidTransition, current.Status)
+	}
+	if current.ReviewedBy == "" || actor == current.ReviewedBy {
+		return model.ResultSignoff{}, ErrReviewerSeparation
+	}
+	review := findReviewByID(current.Reviews, input.ReviewID)
+	if review == nil || review.Status != string(constants.SignoffReviewOpen) {
+		return model.ResultSignoff{}, ErrReviewNotOpen
+	}
+	if review.ID != input.ExpectedVersion {
+		return model.ResultSignoff{}, repository.ErrVersionConflict
+	}
+	if err := s.repository.ResolveReview(ctx, id, input.ReviewID, input.Decision, strings.TrimSpace(input.Reason), actor, requestID); err != nil {
+		return model.ResultSignoff{}, mapReviewError(err)
+	}
+	return s.repository.Get(ctx, id)
+}
+
 func (s *resultSignoffService) Delete(ctx context.Context, id uint, actor, requestID string) error {
 	current, err := s.repository.Get(ctx, id)
 	if err != nil {
@@ -163,4 +237,44 @@ func validateResultSignoffBusinessFields(code, name, facility, owner string) err
 		return ErrInvalidInput
 	}
 	return nil
+}
+
+func validateReviewInput(reason, evidence string) error {
+	if strings.TrimSpace(reason) == "" || strings.TrimSpace(evidence) == "" {
+		return ErrInvalidInput
+	}
+	return nil
+}
+
+func findOpenReview(reviews []model.SignoffReview) *model.SignoffReview {
+	for index := range reviews {
+		if reviews[index].Status == string(constants.SignoffReviewOpen) {
+			return &reviews[index]
+		}
+	}
+	return nil
+}
+
+func findReviewByID(reviews []model.SignoffReview, id uint) *model.SignoffReview {
+	for index := range reviews {
+		if reviews[index].ID == id {
+			return &reviews[index]
+		}
+	}
+	return nil
+}
+
+func mapReviewError(err error) error {
+	switch {
+	case errors.Is(err, repository.ErrDuplicateReview):
+		return ErrReviewOpen
+	case errors.Is(err, repository.ErrReviewTargetInvalid):
+		return fmt.Errorf("%w: target record is not signed", ErrInvalidTransition)
+	case errors.Is(err, repository.ErrReviewMissing):
+		return ErrReviewNotOpen
+	case errors.Is(err, repository.ErrVersionConflict):
+		return repository.ErrVersionConflict
+	default:
+		return fmt.Errorf("correction review: %w", err)
+	}
 }
